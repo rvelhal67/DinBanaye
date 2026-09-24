@@ -1,0 +1,24 @@
+DinBanaye — Daily Routine Planner
+
+Short description:
+Plan your day, track routines, build streaks and stay consistent.
+
+Full description:
+DinBanaye helps you organize your daily routine in a simple, clean and distraction-free way.
+
+FEATURES
+• Create and edit daily routines
+• Organize tasks by Morning, Afternoon, Evening and Night
+• Set repeat schedules
+• Get routine reminders
+• Mark tasks complete
+• Track daily progress
+• See weekly progress
+• Build consistency streaks
+• Dark mode
+• Simple, private on-device storage
+
+No account is required for the core routine features.
+
+Suggested category: Productivity
+Suggested tags: routine, planner, daily tasks, habit tracker, reminders
