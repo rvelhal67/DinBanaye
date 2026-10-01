@@ -41,9 +41,6 @@ import java.text.SimpleDateFormat
 import java.util.*
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.auth.PhoneAuthProvider
-import com.google.firebase.auth.PhoneAuthOptions
-import java.util.concurrent.TimeUnit
 
 
 private val Context.dataStore by preferencesDataStore("dinbanaye")
@@ -156,9 +153,7 @@ fun DinBanayeApp() {
     var firebaseUser by remember { mutableStateOf(auth.currentUser) }
     var authLoading by remember { mutableStateOf(false) }
     var authError by remember { mutableStateOf("") }
-    var verificationId by remember { mutableStateOf<String?>(null) }
-    var phoneVerificationToken by remember { mutableStateOf<PhoneAuthProvider.ForceResendingToken?>(null) }
-    var phoneOtpMode by remember { mutableStateOf(false) }
+    var authNotice by remember { mutableStateOf("") }
 
     LaunchedEffect(firebaseUser) {
         firebaseUser?.let { user ->
@@ -198,10 +193,6 @@ fun DinBanayeApp() {
     var editing by remember { mutableStateOf<RoutineTask?>(null) }
       var showCategories by remember { mutableStateOf(false) }
     var showAccount by remember { mutableStateOf(false) }
-    var showLinkPhone by remember { mutableStateOf(false) }
-    var linkPhone by remember { mutableStateOf("") }
-    var linkOtp by remember { mutableStateOf("") }
-    var linkOtpSent by remember { mutableStateOf(false) }
     val today = dateKey()
 
     LaunchedEffect(Unit) {
@@ -248,148 +239,51 @@ fun DinBanayeApp() {
             AuthScreen(
                 loading = authLoading,
                 error = authError,
+                notice = authNotice,
+                onClearMessage = { authError = ""; authNotice = "" },
                 onLogin = { email, password ->
                     authLoading = true
                     authError = ""
+                    authNotice = ""
                     auth.signInWithEmailAndPassword(email, password)
                         .addOnCompleteListener { result ->
                             authLoading = false
-                            if (result.isSuccessful) {
-                                firebaseUser = auth.currentUser
-                            } else {
-                                authError = result.exception?.message ?: "Login failed"
-                            }
+                            if (result.isSuccessful) firebaseUser = auth.currentUser
+                            else authError = result.exception?.message ?: "Login failed. Please try again."
                         }
                 },
-                onSignup = { email, password ->
+                onSignup = { email, password, phone ->
                     authLoading = true
                     authError = ""
+                    authNotice = ""
                     auth.createUserWithEmailAndPassword(email, password)
                         .addOnCompleteListener { result ->
                             authLoading = false
                             if (result.isSuccessful) {
+                                val user = result.result?.user
+                                if (user != null && !saveContactPhone(context, user.uid, phone)) {
+                                    android.widget.Toast.makeText(context,
+                                        "Account created. Add your contact number again from Account.",
+                                        android.widget.Toast.LENGTH_LONG).show()
+                                }
                                 firebaseUser = auth.currentUser
-                            } else {
-                                authError = result.exception?.message ?: "Account creation failed"
-                            }
+                            } else authError = result.exception?.message ?: "Account creation failed."
                         }
-                }
-
-                ,
+                },
                 onForgotPassword = { email ->
-                    if (email.isBlank()) {
-                        authError = "Enter your email address first."
-                    } else {
-                        authLoading = true
-                        authError = ""
-                        auth.sendPasswordResetEmail(email.trim())
-                            .addOnCompleteListener { result ->
-                                authLoading = false
-                                authError = if (result.isSuccessful) {
-                                    "Password reset email sent."
-                                } else {
-                                    result.exception?.message ?: "Password reset failed"
-                                }
-                            }
-                    }
-                },
-                onVerifyPhoneOtp = { otp ->
-                    val id = verificationId
-
-                    if (id.isNullOrBlank()) {
-                        authError = "Please request OTP first."
-                    } else {
-                        authLoading = true
-                        authError = ""
-
-                        val credential = PhoneAuthProvider.getCredential(id, otp)
-                        val currentUser = auth.currentUser
-
-                        if (currentUser != null) {
-                            currentUser.linkWithCredential(credential)
-                                .addOnCompleteListener { result ->
-                                    authLoading = false
-                                    if (result.isSuccessful) {
-                                        firebaseUser = auth.currentUser
-                                        verificationId = null
-                                        phoneVerificationToken = null
-                                        phoneOtpMode = false
-                                        authError = ""
-                                    } else {
-                                        authError = result.exception?.message
-                                            ?: "Phone linking failed"
-                                    }
-                                }
-                        } else {
-                            auth.signInWithCredential(credential)
-                                .addOnCompleteListener { result ->
-                                    authLoading = false
-                                    if (result.isSuccessful) {
-                                        firebaseUser = auth.currentUser
-                                        verificationId = null
-                                        phoneVerificationToken = null
-                                        phoneOtpMode = false
-                                    } else {
-                                        authError = result.exception?.message
-                                            ?: "Phone login failed"
-                                    }
-                                }
-                        }
-                    }
-                },
-                onSendPhoneOtp = { phone ->
                     authLoading = true
                     authError = ""
-
-                    val activity = context as? android.app.Activity
-
-                    if (activity == null) {
-                        authLoading = false
-                        authError = "Phone verification is unavailable."
-                    } else {
-                        val options = PhoneAuthOptions.newBuilder(auth)
-                            .setPhoneNumber(phone)
-                            .setTimeout(60L, TimeUnit.SECONDS)
-                            .setActivity(activity)
-                            .setCallbacks(
-                                object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
-                                    override fun onVerificationCompleted(
-                                        credential: com.google.firebase.auth.PhoneAuthCredential
-                                    ) {
-                                        auth.signInWithCredential(credential)
-                                            .addOnCompleteListener { result ->
-                                                authLoading = false
-                                                if (result.isSuccessful) {
-                                                    firebaseUser = auth.currentUser
-                                                } else {
-                                                    authError = result.exception?.message
-                                                        ?: "Phone login failed"
-                                                }
-                                            }
-                                    }
-
-                                    override fun onVerificationFailed(
-                                        e: com.google.firebase.FirebaseException
-                                    ) {
-                                        authLoading = false
-                                        authError = e.message ?: "OTP verification failed"
-                                    }
-
-                                    override fun onCodeSent(
-                                        id: String,
-                                        token: PhoneAuthProvider.ForceResendingToken
-                                    ) {
-                                        verificationId = id
-                                        phoneVerificationToken = token
-                                        phoneOtpMode = true
-                                        authLoading = false
-                                    }
-                                }
-                            )
-                            .build()
-
-                        PhoneAuthProvider.verifyPhoneNumber(options)
-                    }
+                    authNotice = ""
+                    auth.sendPasswordResetEmail(email)
+                        .addOnCompleteListener { result ->
+                            authLoading = false
+                            val code = (result.exception as? com.google.firebase.auth.FirebaseAuthException)?.errorCode
+                            if (result.isSuccessful || code == "ERROR_USER_NOT_FOUND") {
+                                authNotice = "If an account exists for this email, a reset link has been requested."
+                            } else {
+                                authError = "Could not request the link. Check your internet and try later."
+                            }
+                        }
                 }
             )
         } else if (onboard) {
@@ -425,14 +319,7 @@ fun DinBanayeApp() {
                                 scope.launch { context.dataStore.edit { it[booleanPreferencesKey("dark")] = dark } }
                             }) { Icon(if (dark) Icons.Default.LightMode else Icons.Default.DarkMode, "Theme") }
 
-                            IconButton(onClick = {
-                                auth.signOut()
-                                firebaseUser = null
-                                authError = ""
-                                verificationId = null
-                                phoneVerificationToken = null
-                                phoneOtpMode = false
-                            }) {
+                            IconButton(onClick = { showAccount = true }) {
                                 Icon(Icons.Default.AccountCircle, "Account")
                             }
 
@@ -440,9 +327,7 @@ fun DinBanayeApp() {
                                 auth.signOut()
                                 firebaseUser = null
                                 authError = ""
-                                verificationId = null
-                                phoneVerificationToken = null
-                                phoneOtpMode = false
+                                authNotice = ""
                             }) {
                                 Icon(Icons.Default.Logout, "Logout")
                             }
@@ -475,213 +360,15 @@ fun DinBanayeApp() {
                     else -> StatsScreen(tasks, pad)
                 }
             }
-              if (showAccount) {
-                AlertDialog(
-                    onDismissRequest = { showAccount = false },
-                    title = { Text("Account") },
-                    text = {
-                        Column {
-                            Text(
-                                "Email: ${firebaseUser?.email ?: "Not available"}",
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Text(
-                                "Phone: ${firebaseUser?.phoneNumber ?: "Not linked"}",
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            if (firebaseUser?.phoneNumber == null) {
-                                Button(
-                                    onClick = {
-                                        showAccount = false
-                                        showLinkPhone = true
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Icon(Icons.Default.Phone, contentDescription = null)
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Link Phone Number")
-                                }
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { showAccount = false }) {
-                            Text("Close")
-                        }
-                    }
-                )
-            }
-
-            if (showLinkPhone) {
-                AlertDialog(
-                    onDismissRequest = {
-                        showLinkPhone = false
-                        linkPhone = ""
-                        linkOtp = ""
-                        linkOtpSent = false
-                    },
-                    title = { Text("Link Phone Number") },
-                    text = {
-                        Column {
-                            OutlinedTextField(
-                                value = linkPhone,
-                                onValueChange = { linkPhone = it },
-                                label = { Text("Phone Number") },
-                                placeholder = { Text("+91 9876543210") },
-                                singleLine = true,
-                                enabled = !linkOtpSent,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-
-                            if (linkOtpSent) {
-                                Spacer(modifier = Modifier.height(12.dp))
-                                OutlinedTextField(
-                                    value = linkOtp,
-                                    onValueChange = { linkOtp = it },
-                                    label = { Text("Enter OTP") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        Button(
-                            onClick = {
-                                val currentUser = auth.currentUser
-
-                                if (currentUser == null) {
-                                    authError = "Please login with your email first."
-                                } else if (!linkOtpSent) {
-                                    authLoading = true
-                                    authError = ""
-
-                                    val activity = context as? android.app.Activity
-
-                                    if (activity == null) {
-                                        authLoading = false
-                                        authError = "Phone verification is unavailable."
-                                    } else {
-                                        val options = PhoneAuthOptions.newBuilder(auth)
-                                            .setPhoneNumber(linkPhone.trim())
-                                            .setTimeout(60L, TimeUnit.SECONDS)
-                                            .setActivity(activity)
-                                            .setCallbacks(
-                                                object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
-                                                    override fun onVerificationCompleted(
-                                                        credential: com.google.firebase.auth.PhoneAuthCredential
-                                                    ) {
-                                                        currentUser.linkWithCredential(credential)
-                                                            .addOnCompleteListener { result ->
-                                                                authLoading = false
-                                                                if (result.isSuccessful) {
-                                                                    firebaseUser = auth.currentUser
-                                                                    showLinkPhone = false
-                                                                    linkPhone = ""
-                                                                    linkOtp = ""
-                                                                    linkOtpSent = false
-                                                                    authError = ""
-                                                                    android.widget.Toast.makeText(
-                                                                        context,
-                                                                        "Phone number linked successfully",
-                                                                        android.widget.Toast.LENGTH_LONG
-                                                                    ).show()
-                                                                } else {
-                                                                    authError = result.exception?.message
-                                                                        ?: "Phone linking failed"
-                                                                }
-                                                            }
-                                                    }
-
-                                                    override fun onVerificationFailed(
-                                                        e: com.google.firebase.FirebaseException
-                                                    ) {
-                                                        authLoading = false
-                                                        authError = e.message ?: "OTP verification failed"
-                                                    }
-
-                                                    override fun onCodeSent(
-                                                        id: String,
-                                                        token: PhoneAuthProvider.ForceResendingToken
-                                                    ) {
-                                                        verificationId = id
-                                                        phoneVerificationToken = token
-                                                        linkOtpSent = true
-                                                        authLoading = false
-                                                    }
-                                                }
-                                            )
-                                            .build()
-
-                                        PhoneAuthProvider.verifyPhoneNumber(options)
-                                    }
-                                } else {
-                                    val id = verificationId
-
-                                    if (id.isNullOrBlank()) {
-                                        authError = "Please request OTP first."
-                                    } else {
-                                        authLoading = true
-                                        authError = ""
-
-                                        val credential =
-                                            PhoneAuthProvider.getCredential(id, linkOtp.trim())
-
-                                        currentUser.linkWithCredential(credential)
-                                            .addOnCompleteListener { result ->
-                                                authLoading = false
-
-                                                if (result.isSuccessful) {
-                                                    firebaseUser = auth.currentUser
-                                                    showLinkPhone = false
-                                                    linkPhone = ""
-                                                    linkOtp = ""
-                                                    linkOtpSent = false
-                                                    verificationId = null
-                                                    phoneVerificationToken = null
-                                                    authError = ""
-
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "Phone number linked successfully",
-                                                        android.widget.Toast.LENGTH_LONG
-                                                    ).show()
-                                                } else {
-                                                    authError = result.exception?.message
-                                                        ?: "Phone linking failed"
-                                                }
-                                            }
-                                    }
-                                }
-                            },
-                            enabled = if (linkOtpSent) {
-                                linkOtp.length >= 6
-                            } else {
-                                linkPhone.isNotBlank()
-                            }
-                        ) {
-                            Text(if (linkOtpSent) "Link Phone" else "Send OTP")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(
-                            onClick = {
-                                showLinkPhone = false
-                                linkPhone = ""
-                                linkOtp = ""
-                                linkOtpSent = false
-                            }
-                        ) {
-                            Text("Cancel")
-                        }
-                    }
-                )
+            if (showAccount) {
+                firebaseUser?.let { user ->
+                    ContactProfileDialog(
+                        uid = user.uid,
+                        email = user.email.orEmpty(),
+                        verifiedPhone = user.phoneNumber,
+                        onDismiss = { showAccount = false }
+                    )
+                }
             }
 
             if (showCategories) {
@@ -710,266 +397,6 @@ fun DinBanayeApp() {
                       save(tasks.map { if(it.id==old.id) old.copy(title=title,time=time,section=section,repeat=repeat,reminder=reminder,categoryId=categoryId) else it })
                     editing=null
                 }
-            }
-        }
-    }
-}
-
-@Composable
-fun AuthScreen(
-    loading: Boolean,
-    error: String,
-    onLogin: (String, String) -> Unit,
-    onSignup: (String, String) -> Unit,
-    onForgotPassword: (String) -> Unit,
-    onSendPhoneOtp: (String) -> Unit,
-    onVerifyPhoneOtp: (String) -> Unit
-) {
-    var email by remember { mutableStateOf("") }
-    var phone by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var otp by remember { mutableStateOf("") }
-    var isSignup by remember { mutableStateOf(false) }
-    var isPhoneMode by remember { mutableStateOf(false) }
-    var otpSent by remember { mutableStateOf(false) }
-
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color(0xFFF7F5FF)),
-        contentAlignment = Alignment.Center
-    ) {
-        Card(
-            Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            shape = RoundedCornerShape(28.dp)
-        ) {
-            Column(
-                Modifier.padding(28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    "DinBanaye",
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF6C63FF)
-                )
-
-                Spacer(Modifier.height(6.dp))
-
-                Text(
-                    if (isPhoneMode) "Login with Phone"
-                    else if (isSignup) "Create your account"
-                    else "Welcome back",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                Spacer(Modifier.height(18.dp))
-
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    TextButton(
-                        onClick = {
-                            isPhoneMode = false
-                            otpSent = false
-                            otp = ""
-                        },
-                        enabled = !loading
-                    ) {
-                        Text(
-                            "Email",
-                            fontWeight = if (!isPhoneMode) FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
-
-                    TextButton(
-                        onClick = {
-                            isPhoneMode = true
-                            otpSent = false
-                            otp = ""
-                        },
-                        enabled = !loading
-                    ) {
-                        Text(
-                            "Phone",
-                            fontWeight = if (isPhoneMode) FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(8.dp))
-
-                if (isPhoneMode) {
-                    OutlinedTextField(
-                        value = phone,
-                        onValueChange = { phone = it },
-                        label = { Text("Phone Number") },
-                        placeholder = { Text("+91 9876543210") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    if (otpSent) {
-                        Spacer(Modifier.height(12.dp))
-
-                        OutlinedTextField(
-                            value = otp,
-                            onValueChange = { otp = it },
-                            label = { Text("Enter OTP") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-
-                    if (error.isNotBlank()) {
-                        Spacer(Modifier.height(10.dp))
-                        Text(
-                            error,
-                            color = MaterialTheme.colorScheme.error,
-                            fontSize = 13.sp,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-
-                    Spacer(Modifier.height(20.dp))
-
-                    Button(
-                        onClick = {
-                            if (!otpSent) {
-                                if (phone.isNotBlank()) {
-                                    onSendPhoneOtp(phone.trim())
-                                    otpSent = true
-                                }
-                            } else {
-                                if (otp.length >= 6) {
-                                    onVerifyPhoneOtp(otp.trim())
-                                }
-                            }
-                        },
-                        enabled = !loading &&
-                            if (!otpSent) phone.isNotBlank()
-                            else otp.length >= 6,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Text(
-                            if (loading) "Please wait..."
-                            else if (otpSent) "Verify OTP"
-                            else "Send OTP"
-                        )
-                    }
-
-                    if (otpSent) {
-                        Spacer(Modifier.height(8.dp))
-
-                        TextButton(
-                            onClick = {
-                                if (phone.isNotBlank()) {
-                                    onSendPhoneOtp(phone.trim())
-                                }
-                            },
-                            enabled = !loading
-                        ) {
-                            Text("Resend OTP")
-                        }
-                    }
-                } else {
-                    OutlinedTextField(
-                        value = email,
-                        onValueChange = { email = it },
-                        label = { Text("Email") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(Modifier.height(12.dp))
-
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("Password") },
-                        singleLine = true,
-                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    if (error.isNotBlank()) {
-                        Spacer(Modifier.height(10.dp))
-                        Text(
-                            error,
-                            color = MaterialTheme.colorScheme.error,
-                            fontSize = 13.sp,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-
-                    if (!isSignup) {
-                        TextButton(
-                            onClick = {
-                                onForgotPassword(email.trim())
-                            },
-                            enabled = !loading && email.isNotBlank()
-                        ) {
-                            Text("Forgot Password?")
-                        }
-                    }
-
-                    Spacer(Modifier.height(8.dp))
-
-                    Button(
-                        onClick = {
-                            if (email.isNotBlank() && password.isNotBlank()) {
-                                if (isSignup) {
-                                    onSignup(email.trim(), password)
-                                } else {
-                                    onLogin(email.trim(), password)
-                                }
-                            }
-                        },
-                        enabled = !loading &&
-                            email.isNotBlank() &&
-                            password.length >= 6,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Text(
-                            if (loading) "Please wait..."
-                            else if (isSignup) "Create Account"
-                            else "Login"
-                        )
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-
-                    TextButton(
-                        onClick = {
-                            isSignup = !isSignup
-                        },
-                        enabled = !loading
-                    ) {
-                        Text(
-                            if (isSignup)
-                                "Already have an account? Login"
-                            else
-                                "New here? Create Account"
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(6.dp))
-
-                Text(
-                    "Your account will be securely managed by Firebase.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center
-                )
             }
         }
     }
