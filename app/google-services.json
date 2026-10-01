@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "611866135156",
+    "project_id": "dinbanaye-cfc70",
+    "storage_bucket": "dinbanaye-cfc70.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:611866135156:android:7adef52dadb0738f9cdf21",
+        "android_client_info": {
+          "package_name": "com.dinbanaye.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDSvAB5NR4Im2cAvK4fUlQTsU4WEwY8KnM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

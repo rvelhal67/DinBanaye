@@ -1,0 +1,1029 @@
+package com.dinbanaye.app
+
+import android.Manifest
+import android.app.*
+import android.content.*
+import android.content.pm.PackageManager
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.datastore.preferences.core.*
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.*
+
+private val Context.dataStore by preferencesDataStore("dinbanaye")
+private const val CHANNEL_ID = "routine_reminders"
+
+data class TaskCategory(
+    val id: Int,
+    val name: String,
+    val color: Long
+)
+
+val defaultTaskCategories = listOf(
+    TaskCategory(0, "Client Work", 0xFFE53935),
+    TaskCategory(1, "Decoration", 0xFFFB8C00),
+    TaskCategory(2, "Meeting", 0xFFFDD835),
+    TaskCategory(3, "Shopping", 0xFF43A047),
+    TaskCategory(4, "Personal", 0xFF1E88E5),
+    TaskCategory(5, "Family", 0xFF8E24AA),
+    TaskCategory(6, "Finance", 0xFF00897B),
+    TaskCategory(7, "Travel", 0xFF3949AB),
+    TaskCategory(8, "Health", 0xFFD81B60),
+    TaskCategory(9, "Study", 0xFF6D4C41),
+    TaskCategory(10, "Important", 0xFF5E35B1),
+    TaskCategory(11, "Follow-up", 0xFF00ACC1),
+    TaskCategory(12, "Event", 0xFF7CB342),
+    TaskCategory(13, "Friends", 0xFFFF7043),
+    TaskCategory(14, "Other", 0xFF757575)
+)
+
+data class RoutineTask(
+    val id: Int, val title: String, val time: String, val section: String,
+    val repeat: String = "Every day", val doneDates: Set<String> = emptySet(),
+    val reminder: Boolean = false, val categoryId: Int = 0
+)
+
+class MainActivity : ComponentActivity() {
+    private val permissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(
+            CHANNEL_ID, "Routine reminders", NotificationManager.IMPORTANCE_HIGH
+        ))
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        setContent { DinBanayeApp() }
+    }
+}
+
+fun dateKey(date: Date = Date()) = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(date)
+
+fun currentStreak(tasks: List<RoutineTask>): Int {
+    if (tasks.isEmpty()) return 0
+    val cal = Calendar.getInstance()
+    var count = 0
+    while (true) {
+        val d = dateKey(cal.time)
+        val applicable = tasks.filter {
+            when (it.repeat) {
+                "Weekdays" -> cal.get(Calendar.DAY_OF_WEEK) !in listOf(Calendar.SATURDAY, Calendar.SUNDAY)
+                "Weekends" -> cal.get(Calendar.DAY_OF_WEEK) in listOf(Calendar.SATURDAY, Calendar.SUNDAY)
+                else -> true
+            }
+        }
+        if (applicable.isNotEmpty() && applicable.all { d in it.doneDates }) {
+            count++; cal.add(Calendar.DAY_OF_YEAR, -1)
+        } else break
+    }
+    return count
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DinBanayeApp() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var tasks by remember { mutableStateOf<List<RoutineTask>>(emptyList()) }
+    var categories by remember { mutableStateOf(defaultTaskCategories) }
+    var dark by remember { mutableStateOf(false) }
+    var onboard by remember { mutableStateOf(true) }
+    var ready by remember { mutableStateOf(false) }
+    var screen by remember { mutableStateOf("Home") }
+    var showAdd by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<RoutineTask?>(null) }
+      var showCategories by remember { mutableStateOf(false) }
+    val today = dateKey()
+
+    LaunchedEffect(Unit) {
+        val p = context.dataStore.data.first()
+        dark = p[booleanPreferencesKey("dark")] ?: false
+        onboard = !(p[booleanPreferencesKey("onboard")] ?: false)
+        tasks = decodeTasks(p[stringPreferencesKey("tasks")] ?: "")
+          categories = decodeTaskCategories(p[stringPreferencesKey("task_categories")] ?: "")
+        if (tasks.isEmpty()) {
+            tasks = listOf(
+                RoutineTask(1,"Wake Up","6:30 AM","Morning"),
+                RoutineTask(2,"Exercise","7:00 AM","Morning"),
+                RoutineTask(3,"Breakfast","8:00 AM","Morning"),
+                RoutineTask(4,"Work","9:30 AM","Afternoon"),
+                RoutineTask(5,"Lunch","1:00 PM","Afternoon"),
+                RoutineTask(6,"Walk","7:00 PM","Evening"),
+                RoutineTask(7,"Dinner","8:30 PM","Night"),
+                RoutineTask(8,"Sleep","10:30 PM","Night")
+            )
+        }
+        ready = true
+    }
+
+    fun save(value: List<RoutineTask>) {
+        tasks = value
+        scope.launch { context.dataStore.edit { it[stringPreferencesKey("tasks")] = encodeTasks(value) } }
+    }
+
+    if (!ready) return
+
+    MaterialTheme(
+        colorScheme = if (dark) darkColorScheme(primary = Color(0xFF9C94FF))
+        else lightColorScheme(primary = Color(0xFF6C63FF), background = Color(0xFFF7F5FF))
+    ) {
+        if (onboard) {
+            Onboarding {
+                onboard = false
+                scope.launch { context.dataStore.edit { it[booleanPreferencesKey("onboard")] = true } }
+            }
+        } else {
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        title = {
+                            Column {
+                                Text("DinBanaye", fontWeight = FontWeight.Bold)
+                                Text(
+                                    when (screen) {
+                                        "Home" -> SimpleDateFormat("EEEE, dd MMMM", Locale.getDefault()).format(Date())
+                                        "Calendar" -> "Your weekly routine"
+                                        else -> "Your routine insights"
+                                    },
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { showCategories = true }) {
+                                Icon(Icons.Default.Label, "Categories")
+                            }
+
+                            IconButton(onClick = {
+                                dark = !dark
+                                scope.launch { context.dataStore.edit { it[booleanPreferencesKey("dark")] = dark } }
+                            }) { Icon(if (dark) Icons.Default.LightMode else Icons.Default.DarkMode, "Theme") }
+                        }
+                    )
+                },
+                bottomBar = {
+                    NavigationBar {
+                        NavigationBarItem(selected=screen=="Home", onClick={screen="Home"}, icon={Icon(Icons.Default.Home, null)}, label={Text("Home")})
+                        NavigationBarItem(selected=screen=="Calendar", onClick={screen="Calendar"}, icon={Icon(Icons.Default.DateRange, null)}, label={Text("Calendar")})
+                        NavigationBarItem(selected=screen=="Stats", onClick={screen="Stats"}, icon={Icon(Icons.Default.BarChart, null)}, label={Text("Stats")})
+                    }
+                },
+                floatingActionButton = {
+                    if (screen == "Home") FloatingActionButton(onClick={showAdd=true}) {
+                        Icon(Icons.Default.Add, "Add")
+                    }
+                }
+            ) { pad ->
+                when (screen) {
+                    "Home" -> HomeScreen(
+                        tasks, today, pad,
+                        { task -> save(tasks.map { if (it.id == task.id) it.copy(
+                            doneDates = if (today in it.doneDates) it.doneDates - today else it.doneDates + today
+                        ) else it }) },
+                        { editing = it },
+                        { task -> save(tasks.filterNot { it.id == task.id }) }
+                    )
+                    "Calendar" -> CalendarScreen(tasks, categories, pad)
+                    else -> StatsScreen(tasks, pad)
+                }
+            }
+              if (showCategories) {
+                  TaskCategoryManager(
+                      categories = categories,
+                      dismiss = { showCategories = false },
+                      onSave = { updated ->
+                          categories = updated
+                          scope.launch {
+                              context.dataStore.edit {
+                                  it[stringPreferencesKey("task_categories")] = encodeTaskCategories(updated)
+                              }
+                          }
+                          showCategories = false
+                      }
+                  )
+              }
+
+              if (showAdd) TaskDialog(null, {showAdd=false}, categories) {title,time,section,repeat,reminder,categoryId ->
+                val id=(tasks.maxOfOrNull{it.id} ?: 0)+1
+                  save(tasks + RoutineTask(id,title,time,section,repeat,emptySet(),reminder,categoryId))
+                showAdd=false
+            }
+            editing?.let { old ->
+                  TaskDialog(old,{editing=null}, categories) {title,time,section,repeat,reminder,categoryId ->
+                      save(tasks.map { if(it.id==old.id) old.copy(title=title,time=time,section=section,repeat=repeat,reminder=reminder,categoryId=categoryId) else it })
+                    editing=null
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun Onboarding(done:()->Unit) {
+    Box(Modifier.fillMaxSize().background(Color(0xFFF7F5FF)), contentAlignment=Alignment.Center) {
+        Card(Modifier.padding(24.dp), shape=RoundedCornerShape(28.dp)) {
+            Column(Modifier.padding(30.dp), horizontalAlignment=Alignment.CenterHorizontally) {
+                Text("✓", fontSize=54.sp, color=Color(0xFF6C63FF), fontWeight=FontWeight.Bold)
+                Text("DinBanaye", fontSize=34.sp, fontWeight=FontWeight.Bold, color=Color(0xFF6C63FF))
+                Spacer(Modifier.height(8.dp))
+                Text("Plan your day. Build your routine.", fontSize=18.sp)
+                Spacer(Modifier.height(12.dp))
+                Text("Tasks • Reminders • Streaks • Progress", color=Color.Gray)
+                Spacer(Modifier.height(28.dp))
+                Button(done, Modifier.fillMaxWidth()) { Text("Get Started") }
+            }
+        }
+    }
+}
+
+@Composable
+fun HomeScreen(
+    tasks:List<RoutineTask>, today:String, pad:PaddingValues,
+    onToggle:(RoutineTask)->Unit, onEdit:(RoutineTask)->Unit, onDelete:(RoutineTask)->Unit
+) {
+    val done=tasks.count{today in it.doneDates}; val p=if(tasks.isEmpty())0f else done.toFloat()/tasks.size
+    LazyColumn(
+        Modifier.fillMaxSize().padding(pad).padding(horizontal=16.dp),
+        verticalArrangement=Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            Spacer(Modifier.height(8.dp))
+            Card(shape=RoundedCornerShape(22.dp)) {
+                Column(Modifier.padding(20.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.SpaceBetween) {
+                        Column { Text("Today's Progress", fontSize=18.sp, fontWeight=FontWeight.Bold); Text("$done of ${tasks.size} tasks", fontSize=13.sp, color=Color.Gray) }
+                        Text("${(p*100).toInt()}%", fontSize = 26.sp, fontWeight=FontWeight.Bold, color=Color(0xFF6C63FF))
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    LinearProgressIndicator({p}, Modifier.fillMaxWidth().height(9.dp))
+                }
+            }
+        }
+        item { Card(shape=RoundedCornerShape(18.dp)) {
+            Row(Modifier.fillMaxWidth().padding(16.dp),verticalAlignment=Alignment.CenterVertically){
+                Text("🔥",fontSize=26.sp);Spacer(Modifier.width(10.dp));Column{Text("${currentStreak(tasks)} day streak",fontWeight=FontWeight.Bold);Text("Keep going!", fontSize=13.sp, color=Color.Gray)}
+            }
+        }}
+        listOf("Morning","Afternoon","Evening","Night").forEach { sec ->
+            val group=tasks.filter{it.section==sec}
+            if(group.isNotEmpty()){
+                item { Text(sec, fontSize=19.sp, fontWeight=FontWeight.Bold, modifier=Modifier.padding(top=8.dp)) }
+                items(group,key={it.id}){task->TaskCard(task,today,onToggle,onEdit,onDelete)}
+            }
+        }
+        item{Spacer(Modifier.height(80.dp))}
+    }
+}
+
+@Composable
+fun TaskCard(task:RoutineTask,today:String,onToggle:(RoutineTask)->Unit,onEdit:(RoutineTask)->Unit,onDelete:(RoutineTask)->Unit){
+    Card(shape=RoundedCornerShape(17.dp)){
+        Row(Modifier.fillMaxWidth().padding(9.dp),verticalAlignment=Alignment.CenterVertically){
+            Checkbox(today in task.doneDates,{onToggle(task)})
+            Column(Modifier.weight(1f)){Text(task.title,fontWeight=FontWeight.SemiBold);Text("${task.time} • ${task.repeat}", fontSize=12.sp, color=Color.Gray)}
+            IconButton({onEdit(task)}){Icon(Icons.Default.Edit,"Edit")}
+            IconButton({onDelete(task)}){Icon(Icons.Default.Delete,"Delete",tint=Color.Gray)}
+        }
+    }
+}
+data class CalendarNote(
+    val id: Long,
+    val date: String,
+    val title: String,
+    val time: String = "",
+    val details: String = "",
+    val categoryId: Int = 0
+)
+
+
+fun encodeCalendarNotes(notes: List<CalendarNote>): String {
+    val arr = JSONArray()
+    notes.forEach {
+        val o = JSONObject()
+        o.put("id", it.id)
+        o.put("date", it.date)
+        o.put("title", it.title)
+        o.put("time", it.time)
+        o.put("details", it.details)
+        o.put("categoryId", it.categoryId)
+        arr.put(o)
+    }
+    return arr.toString()
+}
+
+fun decodeCalendarNotes(raw: String): MutableList<CalendarNote> {
+    val result = mutableListOf<CalendarNote>()
+    if (raw.isBlank()) return result
+
+    try {
+        val arr = JSONArray(raw)
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            result.add(
+                CalendarNote(
+                    id = o.optLong("id"),
+                    date = o.optString("date"),
+                    title = o.optString("title"),
+                    time = o.optString("time"),
+                      details = o.optString("details"),
+                      categoryId = o.optInt("categoryId", 0)
+                )
+            )
+        }
+    } catch (_: Exception) {
+    }
+
+    return result
+}
+
+fun calendarDateKey(year: Int, month: Int, day: Int): String {
+    return String.format(Locale.US, "%04d-%02d-%02d", year, month, day)
+}
+
+fun calendarMonthKey(year: Int, month: Int): String {
+    return String.format(Locale.US, "%04d-%02d", year, month)
+}
+
+fun isCalendarDateAllowed(date: String): Boolean {
+    return date >= "2026-01-01" && date <= "2070-12-31"
+}
+
+@Composable
+fun CalendarScreen(tasks: List<RoutineTask>, categories: List<TaskCategory>, pad: PaddingValues) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    val prefs = remember {
+        context.getSharedPreferences("calendar_notes", Context.MODE_PRIVATE)
+    }
+
+    val notes = remember {
+        mutableStateListOf<CalendarNote>().apply {
+            addAll(decodeCalendarNotes(prefs.getString("notes", "") ?: ""))
+        }
+    }
+
+    val now = remember { Calendar.getInstance() }
+
+    var shownYear by remember {
+        mutableIntStateOf(
+            now.get(Calendar.YEAR).coerceIn(2026, 2070)
+        )
+    }
+
+    var shownMonth by remember {
+        mutableIntStateOf(
+            if (now.get(Calendar.YEAR) in 2026..2070)
+                now.get(Calendar.MONTH)
+            else
+                Calendar.JANUARY
+        )
+    }
+
+    var selectedDate by remember { mutableStateOf<String?>(null) }
+    var showDialog by remember { mutableStateOf(false) }
+    var editingNote by remember { mutableStateOf<CalendarNote?>(null) }
+
+    fun saveNotes() {
+        prefs.edit()
+            .putString("notes", encodeCalendarNotes(notes))
+            .apply()
+    }
+
+    fun previousMonth() {
+        if (shownYear == 2026 && shownMonth == Calendar.JANUARY) return
+
+        if (shownMonth == Calendar.JANUARY) {
+            shownMonth = Calendar.DECEMBER
+            shownYear--
+        } else {
+            shownMonth--
+        }
+    }
+
+    fun nextMonth() {
+        if (shownYear == 2070 && shownMonth == Calendar.DECEMBER) return
+
+        if (shownMonth == Calendar.DECEMBER) {
+            shownMonth = Calendar.JANUARY
+            shownYear++
+        } else {
+            shownMonth++
+        }
+    }
+
+    val monthCalendar = remember(shownYear, shownMonth) {
+        Calendar.getInstance().apply {
+            set(shownYear, shownMonth, 1)
+        }
+    }
+
+    val firstDayOffset = (monthCalendar.get(Calendar.DAY_OF_WEEK) + 5) % 7
+    val daysInMonth = monthCalendar.getActualMaximum(Calendar.DAY_OF_MONTH)
+
+    val monthName = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
+        .format(monthCalendar.time)
+
+    val selectedNotes = selectedDate?.let { date ->
+        notes.filter { it.date == date }
+    } ?: emptyList()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(pad)
+            .padding(horizontal = 16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Spacer(Modifier.height(12.dp))
+
+        Text(
+            "Calendar",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+          Card(
+              modifier = Modifier
+                  .fillMaxWidth()
+                  .pointerInput(shownYear, shownMonth) {
+                      var totalDrag = 0f
+                      detectHorizontalDragGestures(
+                          onHorizontalDrag = { _, dragAmount ->
+                              totalDrag += dragAmount
+                          },
+                          onDragEnd = {
+                              if (totalDrag > 100f) {
+                                  if (shownMonth == Calendar.JANUARY) {
+                                      if (shownYear > 2026) {
+                                          shownYear--
+                                          shownMonth = Calendar.DECEMBER
+                                      }
+                                  } else {
+                                      shownMonth--
+                                  }
+                              } else if (totalDrag < -100f) {
+                                  if (shownMonth == Calendar.DECEMBER) {
+                                      if (shownYear < 2070) {
+                                          shownYear++
+                                          shownMonth = Calendar.JANUARY
+                                      }
+                                  } else {
+                                      shownMonth++
+                                  }
+                              }
+                          }
+                      )
+                  },
+              shape = RoundedCornerShape(16.dp)
+          ) {
+            Column(Modifier.padding(12.dp)) {
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    IconButton(
+                        onClick = { previousMonth() },
+                        enabled = !(shownYear == 2026 && shownMonth == Calendar.JANUARY)
+                    ) {
+                        Icon(Icons.Default.ChevronLeft, "Previous month")
+                    }
+
+                    Text(
+                        monthName,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    IconButton(
+                        onClick = { nextMonth() },
+                        enabled = !(shownYear == 2070 && shownMonth == Calendar.DECEMBER)
+                    ) {
+                        Icon(Icons.Default.ChevronRight, "Next month")
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Row(Modifier.fillMaxWidth()) {
+                    listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+                        .forEach {
+                            Text(
+                                text = it,
+                                modifier = Modifier.weight(1f),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                        }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                repeat(6) { week ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        repeat(7) { column ->
+                            val index = week * 7 + column
+                            val day = index - firstDayOffset + 1
+
+                            if (day in 1..daysInMonth) {
+                                val dateKey = calendarDateKey(
+                                    shownYear,
+                                    shownMonth + 1,
+                                    day
+                                )
+
+                                  val isToday = dateKey == dateKey()
+                                  val eventCategories = notes
+                                      .filter { it.date == dateKey }
+                                      .mapNotNull { note -> categories.find { it.id == note.categoryId } }
+                                      .distinctBy { it.id }
+
+                                Card(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(2.dp)
+                                        .height(58.dp),
+                                    onClick = {
+                                        selectedDate = dateKey
+                                    }
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                              .background(
+                                                  if (selectedDate == dateKey) {
+                                                      Color(0xFFEDE7F6)
+                                                  } else {
+                                                      Color.Transparent
+                                                  },
+                                                  RoundedCornerShape(12.dp)
+                                              )
+                                            .padding(6.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Row(
+                                            horizontalArrangement = Arrangement.Center,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                "$day",
+                                                color = if (isToday) Color(0xFF2E7D32) else Color.Unspecified,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            if (isToday) {
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("•", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+
+                                          if (eventCategories.isNotEmpty()) {
+                                              Spacer(Modifier.height(3.dp))
+                                              Row(
+                                                  horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                              ) {
+                                                  eventCategories.take(3).forEach { category ->
+                                                      Box(
+                                                          modifier = Modifier
+                                                              .size(7.dp)
+                                                              .background(Color(category.color), CircleShape)
+                                                      )
+                                                  }
+                                              }
+                                          }
+                                    }
+                                }
+                            } else {
+                                Spacer(
+                                    Modifier
+                                        .weight(1f)
+                                        .height(58.dp)
+                                        .padding(2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        selectedDate?.let { date ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(Modifier.padding(16.dp)) {
+
+                    Text(
+                        date,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Spacer(Modifier.height(10.dp))
+
+                    if (selectedNotes.isEmpty()) {
+                        Text("No events added for this date.")
+                    } else {
+                        selectedNotes.forEach { note ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Column(Modifier.padding(12.dp)) {
+                                    Text(
+                                        note.title,
+                                        fontWeight = FontWeight.Bold
+                                    )
+
+                                    if (note.time.isNotBlank()) {
+                                        Text(note.time)
+                                    }
+
+                                    if (note.details.isNotBlank()) {
+                                        Text(note.details)
+                                    }
+
+                                    Row {
+                                        TextButton(
+                                            onClick = {
+                                                editingNote = note
+                                                showDialog = true
+                                            }
+                                        ) {
+                                            Text("Edit")
+                                        }
+
+                                        TextButton(
+                                            onClick = {
+                                                notes.remove(note)
+                                                saveNotes()
+                                            }
+                                        ) {
+                                            Text("Delete")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Button(
+                        onClick = {
+                            editingNote = null
+                            showDialog = true
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Add Event / Note")
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+    }
+
+    if (showDialog && selectedDate != null) {
+        CalendarNoteDialog(
+            date = selectedDate!!,
+            existing = editingNote,
+              categories = categories,
+            onDismiss = {
+                showDialog = false
+                editingNote = null
+            },
+            onSave = { saved ->
+                val index = notes.indexOfFirst { it.id == saved.id }
+
+                if (index >= 0) {
+                    notes[index] = saved
+                } else {
+                    notes.add(saved)
+                }
+
+                saveNotes()
+
+                showDialog = false
+                editingNote = null
+            }
+        )
+    }
+}
+
+@Composable
+fun CalendarNoteDialog(
+    date: String,
+    existing: CalendarNote?,
+    categories: List<TaskCategory>,
+    onDismiss: () -> Unit,
+    onSave: (CalendarNote) -> Unit
+) {
+    var title by remember { mutableStateOf(existing?.title ?: "") }
+    var time by remember { mutableStateOf(existing?.time ?: "") }
+    var details by remember { mutableStateOf(existing?.details ?: "") }
+      var categoryId by remember { mutableIntStateOf(existing?.categoryId ?: 0) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                if (existing == null) "Add Event / Note"
+                else "Edit Event / Note"
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    "Date: $date",
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Title") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = time,
+                    onValueChange = { time = it },
+                    label = { Text("Time (optional)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                  OutlinedTextField(
+                      value = details,
+                      onValueChange = { details = it },
+                      label = { Text("Details (optional)") },
+                      modifier = Modifier.fillMaxWidth()
+                  )
+
+                  Spacer(Modifier.height(10.dp))
+
+                  Text("Category", fontWeight = FontWeight.Bold)
+
+                  categories.chunked(3).forEach { row ->
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(5.dp)
+                      ) {
+                          row.forEach { category ->
+                              FilterChip(
+                                  selected = categoryId == category.id,
+                                  onClick = { categoryId = category.id },
+                                  modifier = Modifier.weight(1f),
+                                  label = {
+                                      Row(
+                                          verticalAlignment = Alignment.CenterVertically,
+                                          horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                      ) {
+                                          Box(
+                                              Modifier
+                                                  .size(10.dp)
+                                                  .background(Color(category.color), CircleShape)
+                                          )
+                                          Text(category.name, fontSize = 11.sp)
+                                      }
+                                  }
+                              )
+                          }
+                      }
+                  }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (title.trim().isNotEmpty() && isCalendarDateAllowed(date)) {
+                        onSave(
+                            CalendarNote(
+                                id = existing?.id ?: System.currentTimeMillis(),
+                                date = date,
+                                title = title.trim(),
+                                time = time.trim(),
+                                details = details.trim(),
+                                  categoryId = categoryId
+                            )
+                        )
+                    }
+                }
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun StatsScreen(tasks:List<RoutineTask>,pad:PaddingValues){
+    Column(Modifier.fillMaxSize().padding(pad).padding(16.dp)){
+        Text("Your Insights", fontSize=24.sp, fontWeight=FontWeight.Bold);Spacer(Modifier.height(14.dp))
+        val today=dateKey();val done=tasks.count{today in it.doneDates};val pct=if(tasks.isEmpty())0 else done*100/tasks.size
+        Card(shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(20.dp)){Text("Today", fontSize=18.sp, fontWeight=FontWeight.Bold);Text("$pct% complete", fontSize=30.sp, fontWeight=FontWeight.Bold, color=Color(0xFF6C63FF));Text("$done / ${tasks.size} tasks")}}
+        Spacer(Modifier.height(12.dp))
+        Card(shape=RoundedCornerShape(20.dp)){Column(Modifier.padding(20.dp)){Text("🔥 Current Streak", fontSize=18.sp, fontWeight=FontWeight.Bold);Text("${currentStreak(tasks)} days", fontSize=30.sp, fontWeight=FontWeight.Bold);Text("Complete your routine daily to grow it.")}}
+    }
+}
+
+@Composable
+fun TaskCategoryManager(
+    categories:List<TaskCategory>,
+    dismiss:()->Unit,
+    onSave:(List<TaskCategory>)->Unit
+){
+    val names=remember(categories){
+        mutableStateListOf(*categories.map{it.name}.toTypedArray())
+    }
+
+    AlertDialog(
+        onDismissRequest=dismiss,
+        title={Text("Task Categories")},
+        text={
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement=Arrangement.spacedBy(8.dp)
+            ){
+                Text("Set a name for each color",fontSize=13.sp)
+
+                categories.forEachIndexed{index,category->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment=Alignment.CenterVertically
+                    ){
+                        Box(
+                            Modifier
+                                .size(18.dp)
+                                .background(Color(category.color),CircleShape)
+                        )
+
+                        Spacer(Modifier.width(8.dp))
+
+                        OutlinedTextField(
+                            names[index],
+                            {names[index]=it},
+                            Modifier.weight(1f),
+                            singleLine=true,
+                            label={Text("Color ${index+1}")}
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton={
+            TextButton(
+                onClick={
+                    onSave(
+                        categories.mapIndexed{index,category->
+                            category.copy(
+                                name=names[index].ifBlank{"Category ${index+1}"}
+                            )
+                        }
+                    )
+                }
+            ){Text("Save")}
+        },
+        dismissButton={TextButton(dismiss){Text("Cancel")}}
+    )
+}
+
+@Composable
+fun TaskDialog(existing:RoutineTask?,dismiss:()->Unit,categories:List<TaskCategory>,onSave:(String,String,String,String,Boolean,Int)->Unit){
+    var title by remember{mutableStateOf(existing?.title?:"")};var time by remember{mutableStateOf(existing?.time?:"")}
+    var section by remember{mutableStateOf(existing?.section?:"Morning")};var repeat by remember{mutableStateOf(existing?.repeat?:"Every day")}
+    var reminder by remember{mutableStateOf(existing?.reminder?:false)}
+    var categoryId by remember{mutableIntStateOf(existing?.categoryId?:0)}
+    AlertDialog(onDismissRequest=dismiss,title={Text(if(existing==null)"Add Routine" else "Edit Routine")},text={
+        Column(verticalArrangement=Arrangement.spacedBy(8.dp)){
+            OutlinedTextField(title,{title=it},label={Text("Task name")},singleLine=true)
+            OutlinedTextField(time,{time=it},label={Text("Time")},singleLine=true)
+            Text("Section");Row(horizontalArrangement=Arrangement.spacedBy(3.dp)){listOf("Morning","Afternoon","Evening","Night").forEach{x->FilterChip(section==x,{section=x},{Text(x)})}}
+            Text("Repeat");Row(horizontalArrangement=Arrangement.spacedBy(3.dp)){listOf("Every day","Weekdays","Weekends").forEach{x->FilterChip(repeat==x,{repeat=x},{Text(x)})}}
+
+              Text("Category",fontWeight=FontWeight.Bold)
+              categories.chunked(3).forEach{row->
+                  Row(
+                      modifier=Modifier.fillMaxWidth(),
+                      horizontalArrangement=Arrangement.spacedBy(5.dp)
+                  ){
+                      row.forEach{category->
+                          FilterChip(
+                              selected=categoryId==category.id,
+                              onClick={categoryId=category.id},
+                              modifier=Modifier.weight(1f),
+                              label={
+                                  Row(
+                                      verticalAlignment=Alignment.CenterVertically,
+                                      horizontalArrangement=Arrangement.spacedBy(4.dp)
+                                  ){
+                                      Box(
+                                          Modifier
+                                              .size(10.dp)
+                                              .background(Color(category.color),CircleShape)
+                                      )
+                                      Text(category.name,fontSize=11.sp)
+                                  }
+                              }
+                          )
+                      }
+                  }
+              }
+            Row(verticalAlignment=Alignment.CenterVertically){Switch(reminder,{reminder=it});Spacer(Modifier.width(8.dp));Text("Reminder")}
+        }
+    },confirmButton={TextButton(enabled=title.isNotBlank(),onClick={onSave(title,time.ifBlank{"Any time"},section,repeat,reminder,categoryId)}){Text("Save")}},
+    dismissButton={TextButton(dismiss){Text("Cancel")}})
+}
+
+fun encodeTaskCategories(categories:List<TaskCategory>):String{
+    val a=JSONArray()
+    categories.forEach{
+        a.put(JSONObject().apply{
+            put("id",it.id)
+            put("name",it.name)
+            put("color",it.color)
+        })
+    }
+    return a.toString()
+}
+
+fun decodeTaskCategories(s:String):List<TaskCategory>{
+    if(s.isBlank()) return defaultTaskCategories
+    return try{
+        val a=JSONArray(s)
+        List(a.length()){i->
+            val o=a.getJSONObject(i)
+            TaskCategory(
+                o.getInt("id"),
+                o.getString("name"),
+                o.getLong("color")
+            )
+        }
+    }catch(_:Exception){
+        defaultTaskCategories
+    }
+}
+
+fun encodeTasks(tasks:List<RoutineTask>):String{
+    val a=JSONArray();tasks.forEach{a.put(JSONObject().apply{
+        put("id",it.id);put("title",it.title);put("time",it.time);put("section",it.section);put("repeat",it.repeat)
+        put("done",JSONArray(it.doneDates.toList()));put("reminder",it.reminder);put("categoryId",it.categoryId)
+    })};return a.toString()
+}
+fun decodeTasks(s:String):List<RoutineTask>{
+    if(s.isBlank())return emptyList()
+    return try{val a=JSONArray(s);List(a.length()){i->val o=a.getJSONObject(i);val set=mutableSetOf<String>();o.optJSONArray("done")?.let{j->for(k in 0 until j.length())set.add(j.getString(k))}
+        RoutineTask(o.getInt("id"),o.getString("title"),o.getString("time"),o.getString("section"),o.optString("repeat","Every day"),set,o.optBoolean("reminder"),o.optInt("categoryId",0))
+    }}catch(_:Exception){emptyList()}
+}

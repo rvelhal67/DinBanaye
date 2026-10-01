@@ -13,7 +13,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.clickable
+import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -34,6 +39,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.*
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.auth.PhoneAuthProvider
+import com.google.firebase.auth.PhoneAuthOptions
+import java.util.concurrent.TimeUnit
+
 
 private val Context.dataStore by preferencesDataStore("dinbanaye")
 private const val CHANNEL_ID = "routine_reminders"
@@ -85,6 +96,34 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+fun saveTasksToFirestore(
+    firestore: FirebaseFirestore,
+    user: com.google.firebase.auth.FirebaseUser,
+    tasks: List<RoutineTask>
+) {
+    val data = mapOf(
+        "tasks" to tasks.map { task ->
+            mapOf(
+                "id" to task.id,
+                "title" to task.title,
+                "time" to task.time,
+                "section" to task.section,
+                "repeat" to task.repeat,
+                "doneDates" to task.doneDates.toList(),
+                "reminder" to task.reminder,
+                "categoryId" to task.categoryId
+            )
+        },
+        "updatedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+    )
+
+    firestore.collection("users")
+        .document(user.uid)
+        .collection("data")
+        .document("tasks")
+        .set(data, com.google.firebase.firestore.SetOptions.merge())
+}
+
 fun dateKey(date: Date = Date()) = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(date)
 
 fun currentStreak(tasks: List<RoutineTask>): Int {
@@ -112,6 +151,43 @@ fun currentStreak(tasks: List<RoutineTask>): Int {
 fun DinBanayeApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
+    val auth = remember { FirebaseAuth.getInstance() }
+    val firestore = remember { FirebaseFirestore.getInstance() }
+    var firebaseUser by remember { mutableStateOf(auth.currentUser) }
+    var authLoading by remember { mutableStateOf(false) }
+    var authError by remember { mutableStateOf("") }
+    var verificationId by remember { mutableStateOf<String?>(null) }
+    var phoneVerificationToken by remember { mutableStateOf<PhoneAuthProvider.ForceResendingToken?>(null) }
+    var phoneOtpMode by remember { mutableStateOf(false) }
+
+    LaunchedEffect(firebaseUser) {
+        firebaseUser?.let { user ->
+            firestore.collection("users")
+                .document(user.uid)
+                .set(
+                    mapOf(
+                        "email" to (user.email ?: ""),
+                        "connectionTest" to true,
+                        "updatedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                    ),
+                    com.google.firebase.firestore.SetOptions.merge()
+                )
+                .addOnSuccessListener {
+                    android.widget.Toast.makeText(
+                        context,
+                        "Firestore connected successfully",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+                .addOnFailureListener { e ->
+                    android.widget.Toast.makeText(
+                        context,
+                        "Firestore error: ${e.message}",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+        }
+    }
     var tasks by remember { mutableStateOf<List<RoutineTask>>(emptyList()) }
     var categories by remember { mutableStateOf(defaultTaskCategories) }
     var dark by remember { mutableStateOf(false) }
@@ -121,6 +197,11 @@ fun DinBanayeApp() {
     var showAdd by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<RoutineTask?>(null) }
       var showCategories by remember { mutableStateOf(false) }
+    var showAccount by remember { mutableStateOf(false) }
+    var showLinkPhone by remember { mutableStateOf(false) }
+    var linkPhone by remember { mutableStateOf("") }
+    var linkOtp by remember { mutableStateOf("") }
+    var linkOtpSent by remember { mutableStateOf(false) }
     val today = dateKey()
 
     LaunchedEffect(Unit) {
@@ -146,7 +227,15 @@ fun DinBanayeApp() {
 
     fun save(value: List<RoutineTask>) {
         tasks = value
-        scope.launch { context.dataStore.edit { it[stringPreferencesKey("tasks")] = encodeTasks(value) } }
+        scope.launch {
+            context.dataStore.edit {
+                it[stringPreferencesKey("tasks")] = encodeTasks(value)
+            }
+        }
+
+        firebaseUser?.let { user ->
+            saveTasksToFirestore(firestore, user, value)
+        }
     }
 
     if (!ready) return
@@ -155,7 +244,155 @@ fun DinBanayeApp() {
         colorScheme = if (dark) darkColorScheme(primary = Color(0xFF9C94FF))
         else lightColorScheme(primary = Color(0xFF6C63FF), background = Color(0xFFF7F5FF))
     ) {
-        if (onboard) {
+        if (firebaseUser == null) {
+            AuthScreen(
+                loading = authLoading,
+                error = authError,
+                onLogin = { email, password ->
+                    authLoading = true
+                    authError = ""
+                    auth.signInWithEmailAndPassword(email, password)
+                        .addOnCompleteListener { result ->
+                            authLoading = false
+                            if (result.isSuccessful) {
+                                firebaseUser = auth.currentUser
+                            } else {
+                                authError = result.exception?.message ?: "Login failed"
+                            }
+                        }
+                },
+                onSignup = { email, password ->
+                    authLoading = true
+                    authError = ""
+                    auth.createUserWithEmailAndPassword(email, password)
+                        .addOnCompleteListener { result ->
+                            authLoading = false
+                            if (result.isSuccessful) {
+                                firebaseUser = auth.currentUser
+                            } else {
+                                authError = result.exception?.message ?: "Account creation failed"
+                            }
+                        }
+                }
+
+                ,
+                onForgotPassword = { email ->
+                    if (email.isBlank()) {
+                        authError = "Enter your email address first."
+                    } else {
+                        authLoading = true
+                        authError = ""
+                        auth.sendPasswordResetEmail(email.trim())
+                            .addOnCompleteListener { result ->
+                                authLoading = false
+                                authError = if (result.isSuccessful) {
+                                    "Password reset email sent."
+                                } else {
+                                    result.exception?.message ?: "Password reset failed"
+                                }
+                            }
+                    }
+                },
+                onVerifyPhoneOtp = { otp ->
+                    val id = verificationId
+
+                    if (id.isNullOrBlank()) {
+                        authError = "Please request OTP first."
+                    } else {
+                        authLoading = true
+                        authError = ""
+
+                        val credential = PhoneAuthProvider.getCredential(id, otp)
+                        val currentUser = auth.currentUser
+
+                        if (currentUser != null) {
+                            currentUser.linkWithCredential(credential)
+                                .addOnCompleteListener { result ->
+                                    authLoading = false
+                                    if (result.isSuccessful) {
+                                        firebaseUser = auth.currentUser
+                                        verificationId = null
+                                        phoneVerificationToken = null
+                                        phoneOtpMode = false
+                                        authError = ""
+                                    } else {
+                                        authError = result.exception?.message
+                                            ?: "Phone linking failed"
+                                    }
+                                }
+                        } else {
+                            auth.signInWithCredential(credential)
+                                .addOnCompleteListener { result ->
+                                    authLoading = false
+                                    if (result.isSuccessful) {
+                                        firebaseUser = auth.currentUser
+                                        verificationId = null
+                                        phoneVerificationToken = null
+                                        phoneOtpMode = false
+                                    } else {
+                                        authError = result.exception?.message
+                                            ?: "Phone login failed"
+                                    }
+                                }
+                        }
+                    }
+                },
+                onSendPhoneOtp = { phone ->
+                    authLoading = true
+                    authError = ""
+
+                    val activity = context as? android.app.Activity
+
+                    if (activity == null) {
+                        authLoading = false
+                        authError = "Phone verification is unavailable."
+                    } else {
+                        val options = PhoneAuthOptions.newBuilder(auth)
+                            .setPhoneNumber(phone)
+                            .setTimeout(60L, TimeUnit.SECONDS)
+                            .setActivity(activity)
+                            .setCallbacks(
+                                object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
+                                    override fun onVerificationCompleted(
+                                        credential: com.google.firebase.auth.PhoneAuthCredential
+                                    ) {
+                                        auth.signInWithCredential(credential)
+                                            .addOnCompleteListener { result ->
+                                                authLoading = false
+                                                if (result.isSuccessful) {
+                                                    firebaseUser = auth.currentUser
+                                                } else {
+                                                    authError = result.exception?.message
+                                                        ?: "Phone login failed"
+                                                }
+                                            }
+                                    }
+
+                                    override fun onVerificationFailed(
+                                        e: com.google.firebase.FirebaseException
+                                    ) {
+                                        authLoading = false
+                                        authError = e.message ?: "OTP verification failed"
+                                    }
+
+                                    override fun onCodeSent(
+                                        id: String,
+                                        token: PhoneAuthProvider.ForceResendingToken
+                                    ) {
+                                        verificationId = id
+                                        phoneVerificationToken = token
+                                        phoneOtpMode = true
+                                        authLoading = false
+                                    }
+                                }
+                            )
+                            .build()
+
+                        PhoneAuthProvider.verifyPhoneNumber(options)
+                    }
+                }
+            )
+        } else if (onboard) {
             Onboarding {
                 onboard = false
                 scope.launch { context.dataStore.edit { it[booleanPreferencesKey("onboard")] = true } }
@@ -187,6 +424,28 @@ fun DinBanayeApp() {
                                 dark = !dark
                                 scope.launch { context.dataStore.edit { it[booleanPreferencesKey("dark")] = dark } }
                             }) { Icon(if (dark) Icons.Default.LightMode else Icons.Default.DarkMode, "Theme") }
+
+                            IconButton(onClick = {
+                                auth.signOut()
+                                firebaseUser = null
+                                authError = ""
+                                verificationId = null
+                                phoneVerificationToken = null
+                                phoneOtpMode = false
+                            }) {
+                                Icon(Icons.Default.AccountCircle, "Account")
+                            }
+
+                            IconButton(onClick = {
+                                auth.signOut()
+                                firebaseUser = null
+                                authError = ""
+                                verificationId = null
+                                phoneVerificationToken = null
+                                phoneOtpMode = false
+                            }) {
+                                Icon(Icons.Default.Logout, "Logout")
+                            }
                         }
                     )
                 },
@@ -216,7 +475,216 @@ fun DinBanayeApp() {
                     else -> StatsScreen(tasks, pad)
                 }
             }
-              if (showCategories) {
+              if (showAccount) {
+                AlertDialog(
+                    onDismissRequest = { showAccount = false },
+                    title = { Text("Account") },
+                    text = {
+                        Column {
+                            Text(
+                                "Email: ${firebaseUser?.email ?: "Not available"}",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Text(
+                                "Phone: ${firebaseUser?.phoneNumber ?: "Not linked"}",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            if (firebaseUser?.phoneNumber == null) {
+                                Button(
+                                    onClick = {
+                                        showAccount = false
+                                        showLinkPhone = true
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.Phone, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Link Phone Number")
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showAccount = false }) {
+                            Text("Close")
+                        }
+                    }
+                )
+            }
+
+            if (showLinkPhone) {
+                AlertDialog(
+                    onDismissRequest = {
+                        showLinkPhone = false
+                        linkPhone = ""
+                        linkOtp = ""
+                        linkOtpSent = false
+                    },
+                    title = { Text("Link Phone Number") },
+                    text = {
+                        Column {
+                            OutlinedTextField(
+                                value = linkPhone,
+                                onValueChange = { linkPhone = it },
+                                label = { Text("Phone Number") },
+                                placeholder = { Text("+91 9876543210") },
+                                singleLine = true,
+                                enabled = !linkOtpSent,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            if (linkOtpSent) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                OutlinedTextField(
+                                    value = linkOtp,
+                                    onValueChange = { linkOtp = it },
+                                    label = { Text("Enter OTP") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val currentUser = auth.currentUser
+
+                                if (currentUser == null) {
+                                    authError = "Please login with your email first."
+                                } else if (!linkOtpSent) {
+                                    authLoading = true
+                                    authError = ""
+
+                                    val activity = context as? android.app.Activity
+
+                                    if (activity == null) {
+                                        authLoading = false
+                                        authError = "Phone verification is unavailable."
+                                    } else {
+                                        val options = PhoneAuthOptions.newBuilder(auth)
+                                            .setPhoneNumber(linkPhone.trim())
+                                            .setTimeout(60L, TimeUnit.SECONDS)
+                                            .setActivity(activity)
+                                            .setCallbacks(
+                                                object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
+                                                    override fun onVerificationCompleted(
+                                                        credential: com.google.firebase.auth.PhoneAuthCredential
+                                                    ) {
+                                                        currentUser.linkWithCredential(credential)
+                                                            .addOnCompleteListener { result ->
+                                                                authLoading = false
+                                                                if (result.isSuccessful) {
+                                                                    firebaseUser = auth.currentUser
+                                                                    showLinkPhone = false
+                                                                    linkPhone = ""
+                                                                    linkOtp = ""
+                                                                    linkOtpSent = false
+                                                                    authError = ""
+                                                                    android.widget.Toast.makeText(
+                                                                        context,
+                                                                        "Phone number linked successfully",
+                                                                        android.widget.Toast.LENGTH_LONG
+                                                                    ).show()
+                                                                } else {
+                                                                    authError = result.exception?.message
+                                                                        ?: "Phone linking failed"
+                                                                }
+                                                            }
+                                                    }
+
+                                                    override fun onVerificationFailed(
+                                                        e: com.google.firebase.FirebaseException
+                                                    ) {
+                                                        authLoading = false
+                                                        authError = e.message ?: "OTP verification failed"
+                                                    }
+
+                                                    override fun onCodeSent(
+                                                        id: String,
+                                                        token: PhoneAuthProvider.ForceResendingToken
+                                                    ) {
+                                                        verificationId = id
+                                                        phoneVerificationToken = token
+                                                        linkOtpSent = true
+                                                        authLoading = false
+                                                    }
+                                                }
+                                            )
+                                            .build()
+
+                                        PhoneAuthProvider.verifyPhoneNumber(options)
+                                    }
+                                } else {
+                                    val id = verificationId
+
+                                    if (id.isNullOrBlank()) {
+                                        authError = "Please request OTP first."
+                                    } else {
+                                        authLoading = true
+                                        authError = ""
+
+                                        val credential =
+                                            PhoneAuthProvider.getCredential(id, linkOtp.trim())
+
+                                        currentUser.linkWithCredential(credential)
+                                            .addOnCompleteListener { result ->
+                                                authLoading = false
+
+                                                if (result.isSuccessful) {
+                                                    firebaseUser = auth.currentUser
+                                                    showLinkPhone = false
+                                                    linkPhone = ""
+                                                    linkOtp = ""
+                                                    linkOtpSent = false
+                                                    verificationId = null
+                                                    phoneVerificationToken = null
+                                                    authError = ""
+
+                                                    android.widget.Toast.makeText(
+                                                        context,
+                                                        "Phone number linked successfully",
+                                                        android.widget.Toast.LENGTH_LONG
+                                                    ).show()
+                                                } else {
+                                                    authError = result.exception?.message
+                                                        ?: "Phone linking failed"
+                                                }
+                                            }
+                                    }
+                                }
+                            },
+                            enabled = if (linkOtpSent) {
+                                linkOtp.length >= 6
+                            } else {
+                                linkPhone.isNotBlank()
+                            }
+                        ) {
+                            Text(if (linkOtpSent) "Link Phone" else "Send OTP")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                showLinkPhone = false
+                                linkPhone = ""
+                                linkOtp = ""
+                                linkOtpSent = false
+                            }
+                        ) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
+
+            if (showCategories) {
                   TaskCategoryManager(
                       categories = categories,
                       dismiss = { showCategories = false },
@@ -248,6 +716,266 @@ fun DinBanayeApp() {
 }
 
 @Composable
+fun AuthScreen(
+    loading: Boolean,
+    error: String,
+    onLogin: (String, String) -> Unit,
+    onSignup: (String, String) -> Unit,
+    onForgotPassword: (String) -> Unit,
+    onSendPhoneOtp: (String) -> Unit,
+    onVerifyPhoneOtp: (String) -> Unit
+) {
+    var email by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var otp by remember { mutableStateOf("") }
+    var isSignup by remember { mutableStateOf(false) }
+    var isPhoneMode by remember { mutableStateOf(false) }
+    var otpSent by remember { mutableStateOf(false) }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF7F5FF)),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            shape = RoundedCornerShape(28.dp)
+        ) {
+            Column(
+                Modifier.padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "DinBanaye",
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF6C63FF)
+                )
+
+                Spacer(Modifier.height(6.dp))
+
+                Text(
+                    if (isPhoneMode) "Login with Phone"
+                    else if (isSignup) "Create your account"
+                    else "Welcome back",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Spacer(Modifier.height(18.dp))
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    TextButton(
+                        onClick = {
+                            isPhoneMode = false
+                            otpSent = false
+                            otp = ""
+                        },
+                        enabled = !loading
+                    ) {
+                        Text(
+                            "Email",
+                            fontWeight = if (!isPhoneMode) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+
+                    TextButton(
+                        onClick = {
+                            isPhoneMode = true
+                            otpSent = false
+                            otp = ""
+                        },
+                        enabled = !loading
+                    ) {
+                        Text(
+                            "Phone",
+                            fontWeight = if (isPhoneMode) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                if (isPhoneMode) {
+                    OutlinedTextField(
+                        value = phone,
+                        onValueChange = { phone = it },
+                        label = { Text("Phone Number") },
+                        placeholder = { Text("+91 9876543210") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (otpSent) {
+                        Spacer(Modifier.height(12.dp))
+
+                        OutlinedTextField(
+                            value = otp,
+                            onValueChange = { otp = it },
+                            label = { Text("Enter OTP") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    if (error.isNotBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            error,
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    Spacer(Modifier.height(20.dp))
+
+                    Button(
+                        onClick = {
+                            if (!otpSent) {
+                                if (phone.isNotBlank()) {
+                                    onSendPhoneOtp(phone.trim())
+                                    otpSent = true
+                                }
+                            } else {
+                                if (otp.length >= 6) {
+                                    onVerifyPhoneOtp(otp.trim())
+                                }
+                            }
+                        },
+                        enabled = !loading &&
+                            if (!otpSent) phone.isNotBlank()
+                            else otp.length >= 6,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(
+                            if (loading) "Please wait..."
+                            else if (otpSent) "Verify OTP"
+                            else "Send OTP"
+                        )
+                    }
+
+                    if (otpSent) {
+                        Spacer(Modifier.height(8.dp))
+
+                        TextButton(
+                            onClick = {
+                                if (phone.isNotBlank()) {
+                                    onSendPhoneOtp(phone.trim())
+                                }
+                            },
+                            enabled = !loading
+                        ) {
+                            Text("Resend OTP")
+                        }
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = email,
+                        onValueChange = { email = it },
+                        label = { Text("Email") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text("Password") },
+                        singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (error.isNotBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            error,
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    if (!isSignup) {
+                        TextButton(
+                            onClick = {
+                                onForgotPassword(email.trim())
+                            },
+                            enabled = !loading && email.isNotBlank()
+                        ) {
+                            Text("Forgot Password?")
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Button(
+                        onClick = {
+                            if (email.isNotBlank() && password.isNotBlank()) {
+                                if (isSignup) {
+                                    onSignup(email.trim(), password)
+                                } else {
+                                    onLogin(email.trim(), password)
+                                }
+                            }
+                        },
+                        enabled = !loading &&
+                            email.isNotBlank() &&
+                            password.length >= 6,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(
+                            if (loading) "Please wait..."
+                            else if (isSignup) "Create Account"
+                            else "Login"
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    TextButton(
+                        onClick = {
+                            isSignup = !isSignup
+                        },
+                        enabled = !loading
+                    ) {
+                        Text(
+                            if (isSignup)
+                                "Already have an account? Login"
+                            else
+                                "New here? Create Account"
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                Text(
+                    "Your account will be securely managed by Firebase.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun Onboarding(done:()->Unit) {
     Box(Modifier.fillMaxSize().background(Color(0xFFF7F5FF)), contentAlignment=Alignment.Center) {
         Card(Modifier.padding(24.dp), shape=RoundedCornerShape(28.dp)) {
@@ -267,54 +995,262 @@ fun Onboarding(done:()->Unit) {
 
 @Composable
 fun HomeScreen(
-    tasks:List<RoutineTask>, today:String, pad:PaddingValues,
-    onToggle:(RoutineTask)->Unit, onEdit:(RoutineTask)->Unit, onDelete:(RoutineTask)->Unit
+    tasks: List<RoutineTask>,
+    today: String,
+    pad: PaddingValues,
+    onToggle: (RoutineTask) -> Unit,
+    onEdit: (RoutineTask) -> Unit,
+    onDelete: (RoutineTask) -> Unit
 ) {
-    val done=tasks.count{today in it.doneDates}; val p=if(tasks.isEmpty())0f else done.toFloat()/tasks.size
+    val done = tasks.count { today in it.doneDates }
+    val progress = if (tasks.isEmpty()) 0f else done.toFloat() / tasks.size
+
     LazyColumn(
-        Modifier.fillMaxSize().padding(pad).padding(horizontal=16.dp),
-        verticalArrangement=Arrangement.spacedBy(10.dp)
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(pad)
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Spacer(Modifier.height(8.dp))
-            Card(shape=RoundedCornerShape(22.dp)) {
-                Column(Modifier.padding(20.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.SpaceBetween) {
-                        Column { Text("Today's Progress", fontSize=18.sp, fontWeight=FontWeight.Bold); Text("$done of ${tasks.size} tasks", fontSize=13.sp, color=Color.Gray) }
-                        Text("${(p*100).toInt()}%", fontSize = 26.sp, fontWeight=FontWeight.Bold, color=Color(0xFF6C63FF))
+            Spacer(Modifier.height(10.dp))
+
+            Text(
+                "Good day 👋",
+                fontSize = 14.sp,
+                color = Color.Gray
+            )
+
+            Text(
+                "Your Daily Tasks",
+                fontSize = 27.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            Text(
+                today,
+                fontSize = 13.sp,
+                color = Color.Gray
+            )
+        }
+
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(24.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Today's Progress",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Spacer(Modifier.height(3.dp))
+
+                            Text(
+                                "$done of ${tasks.size} tasks completed",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                        }
+
+                        Text(
+                            "${(progress * 100).toInt()}%",
+                            fontSize = 27.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF6C63FF)
+                        )
                     }
-                    Spacer(Modifier.height(12.dp))
-                    LinearProgressIndicator({p}, Modifier.fillMaxWidth().height(9.dp))
+
+                    Spacer(Modifier.height(14.dp))
+
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(9.dp)
+                    )
                 }
             }
         }
-        item { Card(shape=RoundedCornerShape(18.dp)) {
-            Row(Modifier.fillMaxWidth().padding(16.dp),verticalAlignment=Alignment.CenterVertically){
-                Text("🔥",fontSize=26.sp);Spacer(Modifier.width(10.dp));Column{Text("${currentStreak(tasks)} day streak",fontWeight=FontWeight.Bold);Text("Keep going!", fontSize=13.sp, color=Color.Gray)}
-            }
-        }}
-        listOf("Morning","Afternoon","Evening","Night").forEach { sec ->
-            val group=tasks.filter{it.section==sec}
-            if(group.isNotEmpty()){
-                item { Text(sec, fontSize=19.sp, fontWeight=FontWeight.Bold, modifier=Modifier.padding(top=8.dp)) }
-                items(group,key={it.id}){task->TaskCard(task,today,onToggle,onEdit,onDelete)}
+
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 15.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .background(
+                                Color(0xFFFFF3E0),
+                                CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("🔥", fontSize = 23.sp)
+                    }
+
+                    Spacer(Modifier.width(13.dp))
+
+                    Column {
+                        Text(
+                            "${currentStreak(tasks)} day streak",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Text(
+                            "Keep going!",
+                            fontSize = 13.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
             }
         }
-        item{Spacer(Modifier.height(80.dp))}
+
+        listOf("Morning", "Afternoon", "Evening", "Night").forEach { section ->
+            val group = tasks.filter { it.section == section }
+
+            if (group.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            section,
+                            fontSize = 19.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Spacer(Modifier.width(8.dp))
+
+                        Text(
+                            "${group.size}",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+
+                items(group, key = { it.id }) { task ->
+                    TaskCard(
+                        task,
+                        today,
+                        onToggle,
+                        onEdit,
+                        onDelete
+                    )
+                }
+            }
+        }
+
+        item {
+            Spacer(Modifier.height(90.dp))
+        }
     }
 }
 
 @Composable
-fun TaskCard(task:RoutineTask,today:String,onToggle:(RoutineTask)->Unit,onEdit:(RoutineTask)->Unit,onDelete:(RoutineTask)->Unit){
-    Card(shape=RoundedCornerShape(17.dp)){
-        Row(Modifier.fillMaxWidth().padding(9.dp),verticalAlignment=Alignment.CenterVertically){
-            Checkbox(today in task.doneDates,{onToggle(task)})
-            Column(Modifier.weight(1f)){Text(task.title,fontWeight=FontWeight.SemiBold);Text("${task.time} • ${task.repeat}", fontSize=12.sp, color=Color.Gray)}
-            IconButton({onEdit(task)}){Icon(Icons.Default.Edit,"Edit")}
-            IconButton({onDelete(task)}){Icon(Icons.Default.Delete,"Delete",tint=Color.Gray)}
+fun TaskCard(
+    task: RoutineTask,
+    today: String,
+    onToggle: (RoutineTask) -> Unit,
+    onEdit: (RoutineTask) -> Unit,
+    onDelete: (RoutineTask) -> Unit
+) {
+    val completed = today in task.doneDates
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp, horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(5.dp)
+                    .height(50.dp)
+                    .background(
+                        Color(0xFF6C63FF),
+                        RoundedCornerShape(8.dp)
+                    )
+            )
+
+            Spacer(Modifier.width(9.dp))
+
+            Checkbox(
+                checked = completed,
+                onCheckedChange = { onToggle(task) }
+            )
+
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 3.dp)
+            ) {
+                Text(
+                    task.title,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (completed) Color.Gray else Color.Unspecified
+                )
+
+                Spacer(Modifier.height(3.dp))
+
+                Text(
+                    "${task.time} • ${task.repeat}",
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+            }
+
+            IconButton(
+                onClick = { onEdit(task) }
+            ) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = "Edit"
+                )
+            }
+
+            IconButton(
+                onClick = { onDelete(task) }
+            ) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "Delete",
+                    tint = Color.Gray
+                )
+            }
         }
     }
 }
+
 data class CalendarNote(
     val id: Long,
     val date: String,
@@ -410,6 +1346,8 @@ fun CalendarScreen(tasks: List<RoutineTask>, categories: List<TaskCategory>, pad
 
     var selectedDate by remember { mutableStateOf<String?>(null) }
     var showDialog by remember { mutableStateOf(false) }
+    var showMonthYearPicker by remember { mutableStateOf(false) }
+    var pickerDay by remember { mutableIntStateOf(1) }
     var editingNote by remember { mutableStateOf<CalendarNote?>(null) }
 
     fun saveNotes() {
@@ -473,10 +1411,40 @@ fun CalendarScreen(tasks: List<RoutineTask>, categories: List<TaskCategory>, pad
 
         Spacer(Modifier.height(12.dp))
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) {
+          Card(
+              modifier = Modifier
+                  .fillMaxWidth()
+                  .pointerInput(shownYear, shownMonth) {
+                      var totalDrag = 0f
+                      detectHorizontalDragGestures(
+                          onHorizontalDrag = { _, dragAmount ->
+                              totalDrag += dragAmount
+                          },
+                          onDragEnd = {
+                              if (totalDrag > 100f) {
+                                  if (shownMonth == Calendar.JANUARY) {
+                                      if (shownYear > 2026) {
+                                          shownYear--
+                                          shownMonth = Calendar.DECEMBER
+                                      }
+                                  } else {
+                                      shownMonth--
+                                  }
+                              } else if (totalDrag < -100f) {
+                                  if (shownMonth == Calendar.DECEMBER) {
+                                      if (shownYear < 2070) {
+                                          shownYear++
+                                          shownMonth = Calendar.JANUARY
+                                      }
+                                  } else {
+                                      shownMonth++
+                                  }
+                              }
+                          }
+                      )
+                  },
+              shape = RoundedCornerShape(16.dp)
+          ) {
             Column(Modifier.padding(12.dp)) {
 
                 Row(
@@ -493,6 +1461,7 @@ fun CalendarScreen(tasks: List<RoutineTask>, categories: List<TaskCategory>, pad
 
                     Text(
                         monthName,
+                        modifier = Modifier.clickable { showMonthYearPicker = true },
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -627,6 +1596,27 @@ fun CalendarScreen(tasks: List<RoutineTask>, categories: List<TaskCategory>, pad
 
                     Spacer(Modifier.height(10.dp))
 
+                    val selectedCal = Calendar.getInstance().apply { time = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(date) ?: Date() }
+                    val dayTasks = tasks.filter { task -> when (task.repeat) { "Weekdays" -> selectedCal.get(Calendar.DAY_OF_WEEK) !in listOf(Calendar.SATURDAY, Calendar.SUNDAY); "Weekends" -> selectedCal.get(Calendar.DAY_OF_WEEK) in listOf(Calendar.SATURDAY, Calendar.SUNDAY); else -> true } }
+                    if (dayTasks.isNotEmpty()) {
+                        Text("Tasks", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(6.dp))
+                        dayTasks.forEach { task ->
+                            val category = categories.find { it.id == task.categoryId }
+                            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                                Row(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Box(modifier = Modifier.size(10.dp).background(Color(category?.color ?: 0xFF757575), CircleShape))
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(task.title, fontWeight = FontWeight.Bold)
+                                        if (task.time.isNotBlank()) Text(task.time, fontSize = 13.sp)
+                                    }
+                                    Text(if (date in task.doneDates) "Completed" else "Pending", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                    }
                     if (selectedNotes.isEmpty()) {
                         Text("No events added for this date.")
                     } else {
@@ -690,6 +1680,155 @@ fun CalendarScreen(tasks: List<RoutineTask>, categories: List<TaskCategory>, pad
         }
 
         Spacer(Modifier.height(20.dp))
+    }
+
+    if (showMonthYearPicker) {
+        val daysForPicker = Calendar.getInstance().apply {
+            set(shownYear, shownMonth, 1)
+        }.getActualMaximum(Calendar.DAY_OF_MONTH)
+
+        if (pickerDay > daysForPicker) {
+            pickerDay = daysForPicker
+        }
+
+        AlertDialog(
+            onDismissRequest = { showMonthYearPicker = false },
+            title = { Text("Select Date") },
+            text = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            "Date",
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+
+                        LazyColumn(
+                            modifier = Modifier.height(180.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            items((1..daysForPicker).toList()) { day ->
+                                Text(
+                                    text = day.toString(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            pickerDay = day
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    textAlign = TextAlign.Center,
+                                    fontWeight = if (pickerDay == day)
+                                        FontWeight.Bold
+                                    else
+                                        FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.weight(1.2f)
+                    ) {
+                        Text(
+                            "Month",
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+
+                        LazyColumn(
+                            modifier = Modifier.height(180.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            items((0..11).toList()) { month ->
+                                Text(
+                                    text = SimpleDateFormat(
+                                        "MMMM",
+                                        Locale.getDefault()
+                                    ).format(
+                                        Calendar.getInstance().apply {
+                                            set(Calendar.MONTH, month)
+                                        }.time
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            shownMonth = month
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    textAlign = TextAlign.Center,
+                                    fontWeight = if (shownMonth == month)
+                                        FontWeight.Bold
+                                    else
+                                        FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            "Year",
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+
+                        LazyColumn(
+                            modifier = Modifier.height(180.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            items((2026..2070).toList()) { year ->
+                                Text(
+                                    text = year.toString(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            shownYear = year
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    textAlign = TextAlign.Center,
+                                    fontWeight = if (shownYear == year)
+                                        FontWeight.Bold
+                                    else
+                                        FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        shownYear = shownYear.coerceIn(2026, 2070)
+                        shownMonth = shownMonth.coerceIn(0, 11)
+                        pickerDay = pickerDay.coerceIn(
+                            1,
+                            Calendar.getInstance().apply {
+                                set(shownYear, shownMonth, 1)
+                            }.getActualMaximum(Calendar.DAY_OF_MONTH)
+                        )
+                        selectedDate = calendarDateKey(
+                            shownYear,
+                            shownMonth + 1,
+                            pickerDay
+                        )
+                        showMonthYearPicker = false
+                    }
+                ) {
+                    Text("Done")
+                }
+            }
+        )
     }
 
     if (showDialog && selectedDate != null) {
